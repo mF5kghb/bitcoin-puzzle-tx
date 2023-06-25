@@ -2,17 +2,15 @@
 name = "bitcoin-puzzle-tx"
 version = "0.1.0"
 edition = "2021"
+authors = ["Rafael Milewski"]
 
 [dependencies]
+anyhow = "1.0.71"
 bitcoin = "0.30.0"
-num-bigint = { version = "0.4.3", features = ["rand", "quickcheck", "std"] }
-num-traits = "0.2.15"
+dotenv = "0.15.0"
 once_cell = "1.18.0"
 rand = "0.8.5"
+rug = { version = "1.19.2", features = ["rand", "integer"] }
 serde = { version = "1.0.164", features = ["serde_derive"] }
 serde_json = { version = "1.0.96" }
-
-[profile.release]
-codegen-units = 1
-lto = true
-panic = "abort"
+ureq = { version = "2.7.1", features = ["tls", "json"] }

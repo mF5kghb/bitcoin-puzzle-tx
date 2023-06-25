@@ -1,54 +1,41 @@
-use std::ops::Add;
-use std::process;
-use std::str::FromStr;
+#![allow(dead_code)]
 
-use bitcoin::{Address, Network, PrivateKey, PublicKey};
-use bitcoin::secp256k1::{All, Secp256k1};
-use num_bigint::{BigUint, RandBigInt};
-use num_traits::{FromPrimitive, One};
+use std::ops::{Sub};
+use anyhow::{anyhow};
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
 use once_cell::sync::Lazy;
+use rug::{Integer};
+use rug::integer::Order;
+use rug::rand::RandState;
 use serde::{Deserialize, Serialize};
 
 static CURVE: Lazy<Secp256k1<All>> = Lazy::new(Secp256k1::new);
 
-fn check_address(current: &BigUint, target: &Address) -> bool {
-    let private_key_bytes = current.to_bytes_be();
-    let length = private_key_bytes.len();
-
-    let mut raw_private_key: Vec<u8> = vec![];
-    raw_private_key.resize(32 - length, 0);
-    raw_private_key.extend_from_slice(&private_key_bytes);
-
-    let private = PrivateKey::from_slice(&raw_private_key, Network::Bitcoin).unwrap();
-    let public = PublicKey::from_private_key(&CURVE, &private);
-    let address = Address::p2pkh(&public, Network::Bitcoin);
-
-    if address.eq(target) {
-        let joined = raw_private_key.iter().map(|x| format!("{:02x}", x)).collect::<String>();
-        println!("{:?} {:?}", address, joined);
-
-        return true;
-    }
-
-    false
-}
-
 pub struct Puzzle {
-    pub address: Address,
+    pub number: u8,
+    pub ripemd160_address: [u8; 20],
+    pub address: String,
     pub range: String,
     pub solution: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PuzzleJson {
+    number: u8,
     address: String,
     range: String,
     private: Option<String>,
 }
 
+pub enum Mode {
+    Random { increment: Integer },
+    Linear
+}
+
 impl Puzzle {
     pub fn number(data: usize) -> Puzzle {
-        let input_path = "./src/puzzles.json";
+        let input_path = "./puzzles.json";
         let text = std::fs::read_to_string(input_path).unwrap();
         let puzzles = serde_json::from_str::<Vec<PuzzleJson>>(&text).unwrap();
         let data = puzzles.get(data - 1).unwrap();
@@ -58,57 +45,95 @@ impl Puzzle {
 
     pub fn from_json(data: &PuzzleJson) -> Puzzle {
         Puzzle::new(
+            data.number.to_owned(),
             data.address.to_owned(),
             data.range.to_owned(),
             data.private.to_owned(),
         )
     }
 
-    pub fn new(address: String, range: String, solution: Option<String>) -> Puzzle {
+    pub fn new(number: u8, address: String, range: String, solution: Option<String>) -> Puzzle {
+        let mut decoded = bitcoin::base58::decode_check(address.as_str()).unwrap();
+        decoded.remove(0);
+        let ripemd160_address: [u8; 20] = decoded.try_into().unwrap();
+
         Puzzle {
-            address: Address::from_str(address.as_str()).unwrap().assume_checked(),
+            number,
+            ripemd160_address,
+            address,
             range,
             solution,
         }
     }
 
-    fn range(&self) -> (BigUint, BigUint) {
-        let range: Vec<_> = self.range
+    fn range(&self) -> (Integer, Integer) {
+        let range: Vec<Integer> = self.range
             .split(':')
-            .map(|value| value.chars().collect::<Vec<char>>())
-            .map(|value| value.chunks(2).map(|value| value.iter().collect::<String>()).collect::<Vec<String>>())
-            .map(|value| value.iter().map(|value| u8::from_str_radix(value, 16).unwrap()).collect::<Vec<u8>>())
+            .map(|value| Integer::from_str_radix(value, 16).unwrap())
             .collect();
 
-        (
-            BigUint::from_bytes_be(range[0].as_slice()),
-            BigUint::from_bytes_be(range[1].as_slice()),
-        )
+        (range[0].clone(), range[1].clone())
     }
 
-    pub fn compute(&self, increments: u32) {
-        let mut random_generator = rand::thread_rng();
-        let (low, high) = self.range();
-        let increment = BigUint::from_u32(increments).unwrap();
+    fn get_public_key(&self, private_key: &Integer) -> anyhow::Result<PublicKey> {
+        let mut private_key_bytes = private_key.to_digits::<u8>(Order::LsfBe);
+        private_key_bytes.resize(32, 0);
+        private_key_bytes.reverse();
 
-        println!("Starting puzzle: {:?} {:?} {:?}", self.address.to_string(), self.range, self.solution);
+        let secret = SecretKey::from_slice(&private_key_bytes)?;
+
+        Ok(PublicKey::from_secret_key(&CURVE, &secret))
+    }
+
+    pub fn start(&self, mode: Mode) -> anyhow::Result<String> {
+        println!("Starting puzzle #{} {:?}", self.number, self.address);
+
+        match mode {
+            Mode::Random { increment } => self.random_mode(increment),
+            Mode::Linear => self.linear_mode()
+        }
+    }
+
+    pub fn linear_mode(&self) -> anyhow::Result<String> {
+        let (low, high) = self.range();
+
+        self.compute(&low, &high)
+    }
+
+    pub fn random_mode(&self, increment: Integer) -> anyhow::Result<String> {
+        let (low, high) = self.range();
+        let mut rand = RandState::new();
 
         loop {
-            let min = random_generator.gen_biguint_range(&low, &high);
-            let max = min.clone().add(&increment);
-            let mut value = min;
+            let max = high.clone().random_below(&mut rand);
+            let min = max.clone().sub(&increment);
 
-            loop {
-                if value.gt(&max) {
-                    break;
-                }
+            if min < low {
+                continue;
+            }
 
-                if check_address(&value, &self.address) {
-                    process::exit(0x0);
-                }
-
-                value = value.add(&BigUint::one());
+            if let Ok(private_key) = self.compute(&min, &max) {
+                return Ok(private_key);
             }
         }
+    }
+
+    fn compute(&self, min: &Integer, max: &Integer) -> anyhow::Result<String> {
+        let mut counter = min.clone();
+        let mut public_key = self.get_public_key(&counter)?;
+
+        while counter < *max {
+            public_key = public_key.add_exp_tweak(&CURVE, &Scalar::ONE)?;
+            counter += 1;
+
+            let hashed = bitcoin::hashes::sha256::Hash::hash(&public_key.serialize());
+            let hashed = bitcoin::hashes::ripemd160::Hash::hash(&hashed.to_byte_array());
+
+            if self.ripemd160_address == hashed.as_ref() {
+                return Ok(counter.to_string_radix(16));
+            }
+        }
+
+        Err(anyhow!("Solution not found..."))
     }
 }
