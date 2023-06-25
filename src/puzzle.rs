@@ -1,6 +1,6 @@
 use std::ops::Add;
+use std::process;
 use std::str::FromStr;
-use std::time::Instant;
 
 use bitcoin::{Address, Network, PrivateKey, PublicKey};
 use bitcoin::secp256k1::{All, Secp256k1};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 static CURVE: Lazy<Secp256k1<All>> = Lazy::new(Secp256k1::new);
 
-fn check_address(current: &BigUint, target: &Address, start: Instant) -> bool {
+fn check_address(current: &BigUint, target: &Address) -> bool {
     let private_key_bytes = current.to_bytes_be();
     let length = private_key_bytes.len();
 
@@ -23,14 +23,9 @@ fn check_address(current: &BigUint, target: &Address, start: Instant) -> bool {
     let public = PublicKey::from_private_key(&CURVE, &private);
     let address = Address::p2pkh(&public, Network::Bitcoin);
 
-    if address.to_string() == target.to_string() {
-        println!("matched");
-    }
-
     if address.eq(target) {
         let joined = raw_private_key.iter().map(|x| format!("{:02x}", x)).collect::<String>();
-        let duration = start.elapsed();
-        println!("{:?} {:?} {:?}", address, joined, duration);
+        println!("{:?} {:?}", address, joined);
 
         return true;
     }
@@ -81,8 +76,8 @@ impl Puzzle {
         let range: Vec<_> = self.range
             .split(':')
             .map(|value| value.chars().collect::<Vec<char>>())
-            .map(|value| value.chunks(2).map(|mut value| value.iter().collect::<String>()).collect::<Vec<String>>())
-            .map(|mut value| value.iter().map(|value| u8::from_str_radix(value, 16).unwrap()).collect::<Vec<u8>>())
+            .map(|value| value.chunks(2).map(|value| value.iter().collect::<String>()).collect::<Vec<String>>())
+            .map(|value| value.iter().map(|value| u8::from_str_radix(value, 16).unwrap()).collect::<Vec<u8>>())
             .collect();
 
         (
@@ -102,15 +97,14 @@ impl Puzzle {
             let min = random_generator.gen_biguint_range(&low, &high);
             let max = min.clone().add(&increment);
             let mut value = min;
-            let start = Instant::now();
 
             loop {
                 if value.gt(&max) {
                     break;
                 }
 
-                if check_address(&value, &self.address, start) {
-                    break;
+                if check_address(&value, &self.address) {
+                    process::exit(0x0);
                 }
 
                 value = value.add(&BigUint::one());

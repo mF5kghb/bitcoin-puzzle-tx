@@ -6,7 +6,8 @@ mod puzzle;
 
 fn main() {
     let puzzles = [
-        Puzzle::number(66)
+        Puzzle::number(66),
+        Puzzle::number(66),
     ];
 
     let mut handles = vec![];
