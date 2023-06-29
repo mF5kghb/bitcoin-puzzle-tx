@@ -1,10 +1,10 @@
 use std::time::Instant;
-use rug::Integer;
 use crate::puzzle::{Mode, Puzzle};
 use dotenv::dotenv;
 
 mod puzzle;
 mod telegram;
+mod speed_checker;
 
 fn telegram_notify(solution: &String) -> anyhow::Result<()> {
     let token = std::env::var("TELEGRAM_BOT_TOKEN")?;
@@ -17,13 +17,13 @@ fn telegram_notify(solution: &String) -> anyhow::Result<()> {
 
 #[inline]
 fn main() -> anyhow::Result<()> {
-    dotenv().ok();
+    dotenv()?;
 
     let number = std::env::var("PUZZLE_NUMBER")?.parse()?;
-    let puzzle = Puzzle::number(number);
+    let mut puzzle = Puzzle::number(number);
     let start = Instant::now();
 
-    match puzzle.start(Mode::Random { increment: Integer::from(200) }) {
+    match puzzle.start(Mode::Linear) {
         Err(error) => println!("{:?}", error),
         Ok(solution) => {
             println!("Found solution {:?} in: {:?}", solution, start.elapsed());

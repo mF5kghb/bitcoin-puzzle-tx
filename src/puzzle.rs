@@ -1,14 +1,16 @@
 #![allow(dead_code)]
 
-use std::ops::{Sub};
-use anyhow::{anyhow};
+use std::ops::{Add, Sub};
+
+use anyhow::anyhow;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
+use num_bigint::{BigUint, RandBigInt};
+use num_traits::{Num, One};
 use once_cell::sync::Lazy;
-use rug::{Integer};
-use rug::integer::Order;
-use rug::rand::RandState;
 use serde::{Deserialize, Serialize};
+
+use crate::speed_checker::SpeedChecker;
 
 static CURVE: Lazy<Secp256k1<All>> = Lazy::new(Secp256k1::new);
 
@@ -18,6 +20,7 @@ pub struct Puzzle {
     pub address: String,
     pub range: String,
     pub solution: Option<String>,
+    speed_checker: SpeedChecker,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -28,9 +31,11 @@ pub struct PuzzleJson {
     private: Option<String>,
 }
 
+#[derive(Debug)]
 pub enum Mode {
-    Random { increment: Integer },
-    Linear
+    Random { increment: BigUint },
+    LinearButStartAtRandom,
+    Linear,
 }
 
 impl Puzzle {
@@ -63,20 +68,21 @@ impl Puzzle {
             address,
             range,
             solution,
+            speed_checker: SpeedChecker::new(),
         }
     }
 
-    fn range(&self) -> (Integer, Integer) {
-        let range: Vec<Integer> = self.range
+    fn range(&self) -> (BigUint, BigUint) {
+        let range: Vec<BigUint> = self.range
             .split(':')
-            .map(|value| Integer::from_str_radix(value, 16).unwrap())
+            .map(|value| BigUint::from_str_radix(value, 16).unwrap())
             .collect();
 
         (range[0].clone(), range[1].clone())
     }
 
-    fn get_public_key(&self, private_key: &Integer) -> anyhow::Result<PublicKey> {
-        let mut private_key_bytes = private_key.to_digits::<u8>(Order::LsfBe);
+    fn get_public_key(&self, private_key: &BigUint) -> anyhow::Result<PublicKey> {
+        let mut private_key_bytes = private_key.to_bytes_le();
         private_key_bytes.resize(32, 0);
         private_key_bytes.reverse();
 
@@ -85,27 +91,40 @@ impl Puzzle {
         Ok(PublicKey::from_secret_key(&CURVE, &secret))
     }
 
-    pub fn start(&self, mode: Mode) -> anyhow::Result<String> {
+    pub fn start(&mut self, mode: Mode) -> anyhow::Result<String> {
         println!("Starting puzzle #{} {:?}", self.number, self.address);
+        println!("Mode: {:?}", mode);
 
         match mode {
             Mode::Random { increment } => self.random_mode(increment),
-            Mode::Linear => self.linear_mode()
+            Mode::Linear => self.linear_mode(),
+            Mode::LinearButStartAtRandom => self.linear_but_start_at_random_mode(),
         }
     }
 
-    pub fn linear_mode(&self) -> anyhow::Result<String> {
+    pub fn linear_but_start_at_random_mode(&mut self) -> anyhow::Result<String> {
+        let (low, high) = self.range();
+
+        let mut generator = rand::thread_rng();
+        let min = generator.gen_biguint_range(&low, &high);
+
+        println!("Range {}:{}", min.to_str_radix(16).to_uppercase(), high.to_str_radix(16).to_uppercase());
+
+        self.compute(&min, &high)
+    }
+
+    pub fn linear_mode(&mut self) -> anyhow::Result<String> {
         let (low, high) = self.range();
 
         self.compute(&low, &high)
     }
 
-    pub fn random_mode(&self, increment: Integer) -> anyhow::Result<String> {
+    pub fn random_mode(&mut self, increment: BigUint) -> anyhow::Result<String> {
         let (low, high) = self.range();
-        let mut rand = RandState::new();
+        let mut generator = rand::thread_rng();
 
         loop {
-            let max = high.clone().random_below(&mut rand);
+            let max = generator.gen_biguint_range(&low, &high);
             let min = max.clone().sub(&increment);
 
             if min < low {
@@ -118,20 +137,22 @@ impl Puzzle {
         }
     }
 
-    fn compute(&self, min: &Integer, max: &Integer) -> anyhow::Result<String> {
+    fn compute(&mut self, min: &BigUint, max: &BigUint) -> anyhow::Result<String> {
         let mut counter = min.clone();
         let mut public_key = self.get_public_key(&counter)?;
 
         while counter < *max {
             public_key = public_key.add_exp_tweak(&CURVE, &Scalar::ONE)?;
-            counter += 1;
+            counter = counter.add(BigUint::one());
 
             let hashed = bitcoin::hashes::sha256::Hash::hash(&public_key.serialize());
             let hashed = bitcoin::hashes::ripemd160::Hash::hash(&hashed.to_byte_array());
 
             if self.ripemd160_address == hashed.as_ref() {
-                return Ok(counter.to_string_radix(16));
+                return Ok(counter.to_str_radix(16));
             }
+
+            self.speed_checker.update();
         }
 
         Err(anyhow!("Solution not found..."))
